@@ -53,6 +53,9 @@ tlf = pylon.TlFactory.GetInstance()
 # Enumerate connected cameras
 devices = tlf.EnumerateDevices()
 
+redis_helper.push_data("cameras", None)
+
+
 if not devices:
     print("No cameras found.")
 else:

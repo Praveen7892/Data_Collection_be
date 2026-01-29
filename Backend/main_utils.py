@@ -16,11 +16,33 @@ def get_cameras_utils ():
     return "cameras", cameras, 200
     
 
+def initialization_utils(data):
+     print(data,":::: data")
+
+     cameras = data["cameras"]
+    #  camera_serial_numbers = cameras["serial_number"]
+     camera_serial_numbers = [
+        cam["serial_number"]
+        for cam in cameras
+        if "serial_number" in cam
+     ]
+
+
+
+
+     print(camera_serial_numbers, "<><><><> camera_serial_numbers" )
+
+     redis_helper.push_data("camera_config",{
+          "camera_ids": camera_serial_numbers
+     })
+
+     return "success", {}, 200
+
 
 def capture_util(data):
 	capture = data.get("capture")
 
-	redis_helper.push_data("capture_trigger",capture)
+	redis_helper.push_data("capture_trigger","capture")
 
 	
 	return "captured", {}, 200

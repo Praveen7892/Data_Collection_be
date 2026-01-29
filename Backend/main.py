@@ -16,10 +16,18 @@ CORS(app)
 CORS(app, origins=["http://localhost:3000"])
 
 
-### Capture Images ###
+### Get all cameras ###
 @app.route('/camera/get_all_cameras', methods=['GET'])
 def get_cameras():
     message, response, status_code = get_cameras_utils()
+    return jsonify({"message":message, "response":response,"status_code":status_code}), status_code
+
+
+### Camera initialization ###
+@app.route('/camera/initialization', methods=['POST'])
+def initialization():
+    data = request.json
+    message, response, status_code = initialization_utils(data)
     return jsonify({"message":message, "response":response,"status_code":status_code}), status_code
 
 
