@@ -14,26 +14,37 @@ def get_cameras_utils ():
     print(cameras, ":::: cameras :::")
 
     return "cameras", cameras, 200
-    
+
+def get_running_cameras_utils():
+    running_col = mongo_helper.read_collection(RUNNING_CAMERAS)
+    running_col_data = running_col.find_one(sort=[("_id", -1)])
+
+    if running_col_data and "_id" in running_col_data:
+        running_col_data["_id"] = str(running_col_data["_id"])
+
+    print(running_col_data, "running_col_data")
+
+    return "success", running_col_data, 200
 
 def initialization_utils(data):
      print(data,":::: data")
 
      cameras = data["cameras"]
-    #  camera_serial_numbers = cameras["serial_number"]
-     camera_serial_numbers = [
-        cam["serial_number"]
+     mode = data["mode"]
+     print(mode, ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> mode ")
+
+     camera_details = [
+        {
+            "serial_number": cam["serial_number"],
+            "aoi": cam.get("aoi")
+        }
         for cam in cameras
         if "serial_number" in cam
      ]
 
-
-
-
-     print(camera_serial_numbers, "<><><><> camera_serial_numbers" )
-
      redis_helper.push_data("camera_config",{
-          "camera_ids": camera_serial_numbers
+          "camera_details": camera_details,
+          "mode": mode
      })
 
      return "success", {}, 200

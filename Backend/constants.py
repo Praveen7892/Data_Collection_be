@@ -8,6 +8,7 @@ IP_ADDRESS = "localhost"
 
 ## collections #####
 DATA = "data"
+RUNNING_CAMERAS = "running_cameras"
 
 
 

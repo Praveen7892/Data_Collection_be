@@ -7,6 +7,8 @@ IP_ADDRESS = "localhost"
 
 
 DATA = "data"
+RUNNING_CAMERAS = "running_cameras"
+
 
 #### redis keys
 
@@ -23,7 +25,6 @@ STORAGE_MESSAGE = "storage_message"
 
 
 BUCKET_PATH = "./../Bucket"
-
 
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 

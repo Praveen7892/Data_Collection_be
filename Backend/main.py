@@ -23,6 +23,12 @@ def get_cameras():
     return jsonify({"message":message, "response":response,"status_code":status_code}), status_code
 
 
+@app.route('/camera/running_cameras', methods=['GET'])
+def get_running_cameras():
+    message, response, status_code = get_running_cameras_utils()
+    return jsonify({"message":message, "response":response,"status_code":status_code}), status_code
+
+
 ### Camera initialization ###
 @app.route('/camera/initialization', methods=['POST'])
 def initialization():

@@ -139,6 +139,191 @@
 
 
 
+# import basler_module
+# import cv2
+# from main_helper import *
+# from datetime import datetime
+# import bson
+# import os
+# import time
+# import threading
+
+# trigger_lock = threading.Lock()
+# dict_lock = threading.Lock()
+
+
+# def imwriter(path, image):
+#     try:
+#         cv2.imwrite(path, image)
+#     except Exception as e:
+#         print("Image write failed:", e)
+
+
+# def capture_image(cam):
+#     """
+#     Safe software-trigger capture for Basler
+#     """
+#     try:
+#         with trigger_lock:
+#             cam.camera.ExecuteSoftwareTrigger()
+
+#         # allow exposure time
+#         time.sleep(0.02)
+
+#         img = cam.get_image()
+#         return img
+
+#     except Exception as e:
+#         print(f"Camera {cam.serial_number} capture error:", e)
+#         return None
+
+
+
+# redis_helper = RedisHelper()
+# mongo_helper = MongoDBHelper()
+
+
+# print("Waiting for camera initialization...")
+
+# camera_ids = []
+# cameras = []
+# master = None
+# initialized = False
+
+# while not initialized:
+#     config = redis_helper.pull_data("camera_config")
+
+#     if not config:
+#         time.sleep(0.1)
+#         continue
+
+#     if not isinstance(config, dict):
+#         print("Invalid camera_config format")
+#         time.sleep(0.1)
+#         continue
+
+#     camera_ids = config.get("camera_ids")
+
+#     if not camera_ids or not isinstance(camera_ids, list):
+#         print("Invalid camera_ids")
+#         time.sleep(0.1)
+#         continue
+
+#     print("Initializing cameras:", camera_ids)
+
+#     master = basler_module.basler_camera_master()
+#     cameras = []
+
+#     for cid in camera_ids:
+#         try:
+#             cam = basler_module.basler_camera_individual(
+#                 master, cid, "SOFTWARE"
+#             )
+
+#             cameras.append(cam)
+#             print(f"Camera {cid} ready")
+
+#         except Exception as e:
+#             print(f"Failed to init camera {cid}:", e)
+
+#     if not cameras:
+#         print("No cameras initialized")
+#         time.sleep(0.5)
+#         continue
+
+#     initialized = True
+#     redis_helper.push_data("camera_config", None)
+
+#     print("Cameras initialized:", [c.serial_number for c in cameras])
+#     time.sleep(0.5)  # warm-up
+
+# print("Multi-camera capture service started")
+
+# def save_capture_data(data):
+#     mongo_helper.read_collection(DATA).insert_one({
+#         "capture_id": data["capture_id"],
+#         "captured_at": data["captured_at"],
+#         "captured_images": data["captured_images"]
+#     })
+#     print(f"Saved capture {data['capture_id']}")
+
+
+# while True:
+
+#     trigger = redis_helper.pull_data("capture_trigger")
+
+#     if trigger != "capture":
+#         time.sleep(0.05)
+#         continue
+
+#     redis_helper.push_data("capture_trigger", None)
+
+#     print("Capture triggered")
+
+#     capture_id = str(bson.ObjectId())
+#     captured_images = {}
+
+#     def capture_worker(cam):
+#         print(f"➡ Triggering camera {cam.serial_number}")
+#         img = capture_image(cam)
+
+#         if img is None:
+#             print(f"No image from camera {cam.serial_number}")
+#             return
+
+#         print(f"Image received from camera {cam.serial_number}")
+#         with dict_lock:
+#             captured_images[cam.serial_number] = img
+
+#     threads = []
+#     for cam in cameras:
+#         t = threading.Thread(target=capture_worker, args=(cam,))
+#         t.start()
+#         threads.append(t)
+
+#     for t in threads:
+#         t.join()
+
+#     if not captured_images:
+#         print("No images captured")
+#         continue
+
+#     today = datetime.now().strftime("%Y_%m_%d")
+#     hour = datetime.now().strftime("%H")
+#     save_dir = os.path.join(BUCKET_PATH, today, hour)
+#     os.makedirs(save_dir, exist_ok=True)
+
+#     image_urls = []
+
+#     def save_worker(cam_id, img):
+#         file_id = str(bson.ObjectId())
+#         file_path = os.path.join(save_dir, f"{cam_id}_{file_id}.jpg")
+#         imwriter(file_path, img)
+
+#         url = file_path.replace(BUCKET_PATH, "http://localhost:3307")
+#         with dict_lock:
+#             image_urls.append(url)
+
+#     threads = []
+#     for cam_id, img in captured_images.items():
+#         t = threading.Thread(target=save_worker, args=(cam_id, img))
+#         t.start()
+#         threads.append(t)
+
+#     for t in threads:
+#         t.join()
+
+#     save_capture_data({
+#         "capture_id": capture_id,
+#         "captured_at": datetime.now().strftime("%Y_%m_%d_%H_%M_%S"),
+#         "captured_images": image_urls
+#     })
+
+#     print(f"Capture complete | Images saved: {len(image_urls)}")
+
+
+
+
 import basler_module
 import cv2
 from main_helper import *
@@ -148,11 +333,16 @@ import os
 import time
 import threading
 
-# ================= LOCKS =================
 trigger_lock = threading.Lock()
 dict_lock = threading.Lock()
+camera_lock = threading.Lock()
 
-# ================= HELPERS =================
+redis_helper = RedisHelper()
+mongo_helper = MongoDBHelper()
+
+cameras = []
+master = None
+last_camera_ids = None
 
 def imwriter(path, image):
     try:
@@ -162,97 +352,154 @@ def imwriter(path, image):
 
 
 def capture_image(cam):
-    """
-    Safe software-trigger capture for Basler
-    """
     try:
         with trigger_lock:
             cam.camera.ExecuteSoftwareTrigger()
 
-        # allow exposure time
         time.sleep(0.02)
-
-        img = cam.get_image()
-        return img
+        return cam.get_image()
 
     except Exception as e:
         print(f"Camera {cam.serial_number} capture error:", e)
         return None
 
 
-# ================= INIT REDIS / DB =================
+def initialize_cameras(camera_details, mode):
+    global cameras, master
 
-redis_helper = RedisHelper()
-mongo_helper = MongoDBHelper()
+    print("Reinitializing cameras")
+    print("Mode:", mode)
 
-# ================= CAMERA INIT =================
+    # cleanup existing cameras
+    if cameras:
+        for cam in cameras:
+            try:
+                cam.close()  # if SDK supports it
+            except:
+                pass
 
-print("Waiting for camera initialization...")
-
-camera_ids = []
-cameras = []
-master = None
-initialized = False
-
-while not initialized:
-    config = redis_helper.pull_data("camera_config")
-
-    if not config:
-        time.sleep(0.1)
-        continue
-
-    if not isinstance(config, dict):
-        print("Invalid camera_config format")
-        time.sleep(0.1)
-        continue
-
-    camera_ids = config.get("camera_ids")
-
-    if not camera_ids or not isinstance(camera_ids, list):
-        print("Invalid camera_ids")
-        time.sleep(0.1)
-        continue
-
-    print("Initializing cameras:", camera_ids)
-
-    master = basler_module.basler_camera_master()
     cameras = []
+    master = basler_module.basler_camera_master()
 
-    for cid in camera_ids:
+    for cam_cfg in camera_details:
         try:
-            cam = basler_module.basler_camera_individual(
-                master, cid, "SOFTWARE"
-            )
+            serial = cam_cfg["serial_number"]
+            aoi = cam_cfg.get("aoi")
 
-            # ===== FORCE SOFTWARE TRIGGER CONFIG =====
-            # cam.camera.TriggerSelector.SetValue("FrameStart")
-            # cam.camera.TriggerMode.SetValue("On")
-            # cam.camera.TriggerSource.SetValue("Software")
+            # apply AOI if present
+            # if aoi:
+            #     cam.set_aoi(
+            #         aoi["offset_x"],
+            #         aoi["offset_y"],
+            #         aoi["width"],
+            #         aoi["height"]
+            #     )
 
-            # # ===== START GRABBING (CRITICAL) =====
-            # if not cam.camera.IsGrabbing():
-            #     cam.camera.StartGrabbing()
+            # cam = basler_module.basler_camera_individual(
+            #     master,
+            #     serial,
+            #     mode,
+            #     aoi
+            # )
+
+            if aoi:
+                # If AOI is provided, pass it to the constructor or set it after creation
+                cam = basler_module.basler_camera_individual(
+                    master,
+                    serial,
+                    mode,
+                    aoi  # if constructor supports AOI
+                )
+            else:
+                # No AOI, just initialize normally
+                cam = basler_module.basler_camera_individual(
+                    master,
+                    serial,
+                    mode
+                )
+
+            # If the SDK requires setting AOI after creation, do it like this:
+            if aoi and not hasattr(cam, "aoi_in_constructor"):  # pseudo check
+                cam.set_aoi(
+                    aoi["offset_x"],
+                    aoi["offset_y"],
+                    aoi["width"],
+                    aoi["height"]
+                )
+
 
             cameras.append(cam)
-            print(f"Camera {cid} ready")
+            print(f"Camera {serial} ready | AOI: {aoi}")
 
         except Exception as e:
-            print(f"Failed to init camera {cid}:", e)
+            print(f"Failed to init camera {cam_cfg}:", e)
 
-    if not cameras:
-        print("No cameras initialized")
-        time.sleep(0.5)
-        continue
+    print("Active cameras:", [c.serial_number for c in cameras])
+    save_running_cameras(camera_details,mode)
+    time.sleep(0.5)
 
-    initialized = True
-    redis_helper.push_data("camera_config", None)
 
-    print("Cameras initialized:", [c.serial_number for c in cameras])
-    time.sleep(0.5)  # warm-up
 
-print("🚀 Multi-camera capture service started")
+# def camera_config_watcher():
+#     global last_camera_ids
 
-# ================= SAVE TO MONGO =================
+#     print("Camera config watcher started")
+
+#     while True:
+#         config = redis_helper.pull_data("camera_config")
+
+#         if not config or not isinstance(config, dict):
+#             time.sleep(0.1)
+#             continue
+
+#         camera_ids = config.get("camera_ids")
+
+#         if not camera_ids or not isinstance(camera_ids, list):
+#             time.sleep(0.1)
+#             continue
+
+#         if camera_ids != last_camera_ids:
+#             with camera_lock:
+#                 initialize_cameras(camera_ids)
+#                 last_camera_ids = camera_ids.copy()
+
+#             redis_helper.push_data("camera_config", None)
+
+#         time.sleep(0.1)
+
+
+def camera_config_watcher():
+    global last_camera_ids
+
+    print("Camera config watcher started")
+
+    while True:
+        config = redis_helper.pull_data("camera_config")
+
+        if not config or not isinstance(config, dict):
+            time.sleep(0.1)
+            continue
+
+        camera_details = config.get("camera_details")
+        mode = config.get("mode", "SOFTWARE")
+
+        if not camera_details or not isinstance(camera_details, list):
+            time.sleep(0.1)
+            continue
+
+        # extract serial numbers for change detection
+        camera_ids = [c["serial_number"] for c in camera_details]
+
+        if camera_ids != last_camera_ids:
+            with camera_lock:
+                initialize_cameras(camera_details, mode)
+                last_camera_ids = camera_ids.copy()
+
+            redis_helper.push_data("camera_config", None)
+
+        time.sleep(0.1)
+
+
 
 def save_capture_data(data):
     mongo_helper.read_collection(DATA).insert_one({
@@ -262,10 +509,34 @@ def save_capture_data(data):
     })
     print(f"Saved capture {data['capture_id']}")
 
-# ================= CAPTURE LOOP =================
+
+def save_running_cameras(camera_details, mode):
+    mongo_helper.read_collection(RUNNING_CAMERAS).update_one(
+        {},  # single document
+        {
+            "$set": {
+                "camera_details": camera_details,
+                "mode": mode,
+                "started_at": datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+            }
+        },
+        upsert=True
+    )
+
+    print("Running cameras state saved")
+
+
+
+
+
+threading.Thread(
+    target=camera_config_watcher,
+    daemon=True
+).start()
+
+print("Multi-camera capture service started")
 
 while True:
-
     trigger = redis_helper.pull_data("capture_trigger")
 
     if trigger != "capture":
@@ -273,39 +544,40 @@ while True:
         continue
 
     redis_helper.push_data("capture_trigger", None)
-
-    print("📸 Capture triggered")
+    print("Capture triggered")
 
     capture_id = str(bson.ObjectId())
     captured_images = {}
 
-    # ---------- CAPTURE THREAD ----------
     def capture_worker(cam):
-        print(f"➡ Triggering camera {cam.serial_number}")
+        print(f"Triggering camera {cam.serial_number}")
         img = capture_image(cam)
 
         if img is None:
             print(f"No image from camera {cam.serial_number}")
             return
 
-        print(f"Image received from camera {cam.serial_number}")
         with dict_lock:
             captured_images[cam.serial_number] = img
 
-    threads = []
-    for cam in cameras:
-        t = threading.Thread(target=capture_worker, args=(cam,))
-        t.start()
-        threads.append(t)
+    with camera_lock:
+        if not cameras:
+            print("No cameras available")
+            continue
 
-    for t in threads:
-        t.join()
+        threads = []
+        for cam in cameras:
+            t = threading.Thread(target=capture_worker, args=(cam,))
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
 
     if not captured_images:
         print("No images captured")
         continue
 
-    # ---------- SAVE IMAGES ----------
     today = datetime.now().strftime("%Y_%m_%d")
     hour = datetime.now().strftime("%H")
     save_dir = os.path.join(BUCKET_PATH, today, hour)
@@ -331,7 +603,6 @@ while True:
     for t in threads:
         t.join()
 
-    # ---------- SAVE META ----------
     save_capture_data({
         "capture_id": capture_id,
         "captured_at": datetime.now().strftime("%Y_%m_%d_%H_%M_%S"),
@@ -339,3 +610,4 @@ while True:
     })
 
     print(f"Capture complete | Images saved: {len(image_urls)}")
+
