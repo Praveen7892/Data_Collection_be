@@ -31,7 +31,7 @@ class basler_camera_master():
 		print('Number of devices found',self.devices)
 
 class basler_camera_individual():
-	def __init__(self,master,desired_serial_number,mode=HARDWARE,aoi_config = None):
+	def __init__(self,master,desired_serial_number,mode=SOFTWARE,aoi_config = None):
 		# Find the camera with the desired serial number
 		self.serial_number = desired_serial_number
 		self.camera = None
@@ -351,3 +351,68 @@ class basler_camera_continous():
 	def close(self):
 		self.camera.StopGrabbing()
 		self.camera.Close()
+
+
+
+
+
+class basler_camera_connector:
+    """
+    Class to enumerate all connected Basler cameras and push their info to Redis.
+    Can also return the list of connected cameras.
+    """
+    def __init__(self):
+        self.redis_key = "cameras"
+        self.tl_factory = pylon.TlFactory.GetInstance()
+        self.devices = []          # Low-level device objects
+        self.cameras_info = []     # High-level camera info
+        self.enumerate_cameras()
+
+    def enumerate_cameras(self):
+        """
+        Enumerate all connected cameras, store info, and push to Redis.
+        """
+        devices = self.tl_factory.EnumerateDevices()
+        self.devices = devices
+
+        # Clear previous Redis entry
+        # redis_helper.push_data(self.redis_key, None)
+
+        if not devices:
+            print("No cameras found.")
+            self.cameras_info = []
+            return []
+
+        camera_list = []
+
+        for device in devices:
+            camera = pylon.InstantCamera(self.tl_factory.CreateDevice(device))
+            camera.Open()
+
+            camera_info = {
+                "device_class": device.GetDeviceClass(),
+                "model_name": device.GetModelName(),
+                "serial_number": device.GetSerialNumber(),
+                "friendly_name": device.GetFriendlyName(),
+                "width": camera.Width.GetValue(),
+                "height": camera.Height.GetValue(),
+                "offset_x": camera.OffsetX.GetValue(),
+                "offset_y": camera.OffsetY.GetValue()
+            }
+
+            camera_list.append(camera_info)
+            camera.Close()
+
+        self.cameras_info = camera_list
+        redis_helper.push_data(self.redis_key, camera_list)
+        print(f"Found {len(camera_list)} cameras.")
+        return camera_list
+
+    def get_camera_by_serial(self, serial_number):
+        """
+        Returns the device object for a given serial number, or None if not found.
+        """
+        for device in self.devices:
+            if device.GetSerialNumber() == serial_number:
+                return device
+        return None
