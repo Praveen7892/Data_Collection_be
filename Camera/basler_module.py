@@ -357,62 +357,123 @@ class basler_camera_continous():
 
 
 class basler_camera_connector:
-    """
-    Class to enumerate all connected Basler cameras and push their info to Redis.
-    Can also return the list of connected cameras.
-    """
-    def __init__(self):
-        self.redis_key = "cameras"
-        self.tl_factory = pylon.TlFactory.GetInstance()
-        self.devices = []          # Low-level device objects
-        self.cameras_info = []     # High-level camera info
-        self.enumerate_cameras()
+	"""
+	Class to enumerate all connected Basler cameras and push their info to Redis.
+	Can also return the list of connected cameras.
+	"""
+	def __init__(self):
+		self.redis_key = "cameras"
+		self.tl_factory = pylon.TlFactory.GetInstance()
+		self.devices = []          # Low-level device objects
+		self.cameras_info = []     # High-level camera info
+		self.enumerate_cameras()
 
-    def enumerate_cameras(self):
-        """
-        Enumerate all connected cameras, store info, and push to Redis.
-        """
-        devices = self.tl_factory.EnumerateDevices()
-        self.devices = devices
+	def enumerate_cameras(self):
+		"""
+		Enumerate all connected cameras, store info, and push to Redis.
+		"""
+		devices = self.tl_factory.EnumerateDevices()
+		self.devices = devices
 
-        # Clear previous Redis entry
-        # redis_helper.push_data(self.redis_key, None)
+		# Clear previous Redis entry
+		# redis_helper.push_data(self.redis_key, None)
 
-        if not devices:
-            print("No cameras found.")
-            self.cameras_info = []
-            return []
+		if not devices:
+			print("No cameras found.")
+			self.cameras_info = []
+			return []
 
-        camera_list = []
+		camera_list = []
 
-        for device in devices:
-            camera = pylon.InstantCamera(self.tl_factory.CreateDevice(device))
-            camera.Open()
+		def safe_get(camera, attr, default=None):
+			try:
+				# First try the camera property
+				if hasattr(camera, attr):
+					return getattr(camera, attr).GetValue()
+				# Fallback to NodeMap
+				node = camera.GetNodeMap().GetNode(attr)
+				if node and node.IsReadable():
+					return node.GetValue()
+			except Exception:
+				pass
+			return default
+		
+		def safe_get_exposure(camera):
+			for node_name in ["ExposureTimeAbs", "ExposureTime"]:
+				try:
+					if hasattr(camera, node_name):
+						val = getattr(camera, node_name).GetValue()
+						if val is not None:
+							return float(val)
+					node = camera.GetNodeMap().GetNode(node_name)
+					if node and node.IsReadable():
+						val = node.GetValue()
+						if val is not None:
+							return float(val)
+				except Exception:
+					continue
+			return None
 
-            camera_info = {
-                "device_class": device.GetDeviceClass(),
-                "model_name": device.GetModelName(),
-                "serial_number": device.GetSerialNumber(),
-                "friendly_name": device.GetFriendlyName(),
-                "width": camera.Width.GetValue(),
-                "height": camera.Height.GetValue(),
-                "offset_x": camera.OffsetX.GetValue(),
-                "offset_y": camera.OffsetY.GetValue()
-            }
 
-            camera_list.append(camera_info)
-            camera.Close()
 
-        self.cameras_info = camera_list
-        redis_helper.push_data(self.redis_key, camera_list)
-        print(f"Found {len(camera_list)} cameras.")
-        return camera_list
 
-    def get_camera_by_serial(self, serial_number):
-        """
-        Returns the device object for a given serial number, or None if not found.
-        """
-        for device in self.devices:
-            if device.GetSerialNumber() == serial_number:
-                return device
-        return None
+		for device in devices:
+			camera = pylon.InstantCamera(self.tl_factory.CreateDevice(device))
+			camera.Open()
+
+
+			camera.AcquisitionMode.SetValue("Continuous")
+			camera.TriggerSelector.SetValue("FrameStart")
+			camera.TriggerMode.SetValue("Off")
+
+			camera.StartGrabbing(1)
+			time.sleep(0.05)
+			camera.StopGrabbing()
+
+			print(safe_get(camera, "AcquisitionMode"))
+			print(safe_get(camera, "PixelFormat"))
+			print(safe_get(camera, "TriggerMode"))
+			print(safe_get_exposure(camera),"exposure_time_us")
+
+
+
+			camera_info = {
+				"device_class": device.GetDeviceClass(),
+				"model_name": device.GetModelName(),
+				"serial_number": device.GetSerialNumber(),
+				"friendly_name": device.GetFriendlyName(),
+				"width": camera.Width.GetValue(),
+				"height": camera.Height.GetValue(),
+				"offset_x": camera.OffsetX.GetValue(),
+				"offset_y": camera.OffsetY.GetValue(),
+
+				"exposure_auto": safe_get(camera, "ExposureAuto"),
+				"exposure_time_us": safe_get_exposure(camera),  
+
+				# Trigger
+				"trigger_mode": safe_get(camera, "TriggerMode"),
+				"trigger_source": safe_get(camera, "TriggerSource"),
+				"trigger_activation": safe_get(camera, "TriggerActivation"),
+
+				# White balance (safe for mono cameras)
+				"balance_white_auto": safe_get(camera, "BalanceWhiteAuto"),
+
+			}
+
+			camera_list.append(camera_info)
+			camera.Close()
+
+		self.cameras_info = camera_list
+		redis_helper.push_data(self.redis_key, camera_list)
+		print(f"Found {len(camera_list)} cameras.")
+
+		return camera_list
+
+	def get_camera_by_serial(self, serial_number):
+		"""
+		Returns the device object for a given serial number, or None if not found.
+		"""
+		for device in self.devices:
+			if device.GetSerialNumber() == serial_number:
+				return device
+		return None
